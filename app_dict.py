@@ -190,7 +190,42 @@ def wx_handler():
         msg_dict = xmltodict.parse(xml_data)['xml']
         
         if msg_dict.get('MsgType') == 'text':
-            chat(msg_dict.get('FromUserName'), msg_dict.get('Content'))
+            user = msg_dict.get('FromUserName')
+            content = msg_dict.get('Content')
+            to_user = msg_dict.get('ToUserName')  # 获取开发者微信号
+            
+            # 调用AI获取回复
+            try:
+                if content == "#开始":
+                    chat_session = model.start_chat(history=[])
+                    user2session[user] = chat_session
+                    response_text = "对话模式开始..."
+                elif content == "#结束":
+                    if user in user2session:
+                        del user2session[user]
+                    response_text = "对话模式结束..."
+                else:
+                    chat_session = user2session.get(user)
+                    if chat_session:
+                        response = chat_session.send_message(content).text
+                    else:
+                        response = model.generate_content(content).text
+                    response_text = convert_to_text(response)
+            except Exception as e:
+                logging.error("Error in chat: %s", e)
+                response_text = "抱歉，服务出现异常，请稍后重试。"
+
+            # 构造返回的XML
+            reply = {
+                'xml': {
+                    'ToUserName': user,
+                    'FromUserName': to_user,
+                    'CreateTime': str(int(time.time())),
+                    'MsgType': 'text',
+                    'Content': response_text
+                }
+            }
+            return xmltodict.unparse(reply)
         
         return 'success'
     except Exception as e:
