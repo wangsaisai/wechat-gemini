@@ -4,7 +4,7 @@
 
 ## 功能特点
 
-- 支持与 Gemini AI 进行智能对话
+- 支持与 Gemini AI 进行智能对话（支持文字，图片，语言）
 - 支持单次对话和连续对话模式
 - 自动处理长消息的分段发送
 - 支持 Markdown 格式转换
@@ -55,7 +55,7 @@ pip install -r requirements.txt
         "temperature": 0.9,
         "top_p": 1,
         "top_k": 1,
-        "max_output_tokens": 2048
+        "max_output_tokens": 8192
     }
 }
 ```
@@ -89,7 +89,7 @@ python app_dict.py
    - 服务端口号，必须为 `80(http)` 或 `443(https)`
    - 单条消息最大长度限制
    - 每日调用次数限制
-   - 消息响应时间限制（`5秒`）
+   - 消息响应时间限制（`5秒`），客服消息接口无此限制（访问AI时使用客服消息接口）
 
 ## 错误处理
 

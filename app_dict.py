@@ -94,6 +94,13 @@ def cut_message(message, max_length=2000):
         messages.append("\n".join(current))
     return messages
 
+# 使用客服消息接口进行异步回复：原因如下
+# https://developers.weixin.qq.com/doc/offiaccount/Message_Management/Passive_user_reply_message.html
+# 假如服务器无法保证在五秒内处理并回复,必须做出下述回复,这样微信服务器才不会对此作任何处理,并且不会发起重试(这种情况下,可以使用客服消息接口进行异步回复),否则,将出现严重的错误提示。
+# 详见下面说明: 
+# 1、直接回复success(推荐方式) 2、直接回复空串(指字节长度为0的空字符串,而不是XML结构体中content字段的内容为空) 
+# 一旦遇到以下情况,微信都会在公众号会话中,向用户下发系统提示“该公众号暂时无法提供服务,请稍后再试”
+# 1、开发者在5秒内未回复任何内容 2、开发者回复了异常数据，比如JSON数据等
 def send(user, message, message_type="text"):
     """发送消息到公众号用户"""
     access_token = token_manager.get_token()
@@ -121,6 +128,10 @@ def send(user, message, message_type="text"):
             
             if response.get('errcode', 0) != 0:
                 logging.error("Failed to send message: %s", response)
+                # 如果是token过期错误(errcode=40001)，应该刷新token后重试
+                if response.get('errcode') == 40001:
+                    token_manager.access_token = None
+                    return send(user, message, message_type)
             time.sleep(0.5)  # 避免发送太快
         except Exception as e:
             logging.error("Error sending message: %s", e)
@@ -135,7 +146,17 @@ def convert_to_text(input_str):
     text = re.sub(r'[*#>`~_\[\]\(\)]+', '', text)
     return text.strip()
 
-def chat(user, message):
+def clean_chat():
+    # 添加会话数量限制
+    if len(user2session) > 10000:  # 设置合理的最大会话数
+        # 清理最早的会话
+        oldest_users = sorted(user2session.keys())[:1000]  # 清理1000个最早的会话
+        for old_user in oldest_users:
+            user2session.pop(old_user, None)
+
+def chat(user, message, image_url=None):
+    clean_chat()
+    
     """处理聊天消息"""
     logging.debug("%s ask gemini: %s", user, message)
     
@@ -150,13 +171,22 @@ def chat(user, message):
             user2session.pop(user, None)
             send(user, "对话模式结束...")
             return
-            
-        # 处理普通消息
-        chat_session = user2session.get(user)
-        if chat_session:
-            response = chat_session.send_message(message).text
+        
+        # 处理带图片的消息
+        if image_url:
+            try:
+                image_data = requests.get(image_url).content
+                response = model.generate_content([message, image_data]).text
+            except Exception as e:
+                logging.error("Error processing image: %s", e)
+                response = "抱歉，图片处理失败，请稍后重试。"
         else:
-            response = model.generate_content(message).text
+            # 处理普通消息
+            chat_session = user2session.get(user)
+            if chat_session:
+                response = chat_session.send_message(message).text
+            else:
+                response = model.generate_content(message).text
             
         send(user, convert_to_text(response))
         logging.info("Gemini answer: %s", response)
@@ -188,34 +218,37 @@ def wx_handler():
     try:
         xml_data = request.get_data(as_text=True)
         msg_dict = xmltodict.parse(xml_data)['xml']
-        
-        if msg_dict.get('MsgType') == 'text':
-            user = msg_dict.get('FromUserName')
-            content = msg_dict.get('Content')
-            to_user = msg_dict.get('ToUserName')  # 获取开发者微信号
-            
-            # 调用AI获取回复
-            try:
-                if content == "#开始":
-                    chat_session = model.start_chat(history=[])
-                    user2session[user] = chat_session
-                    response_text = "对话模式开始..."
-                elif content == "#结束":
-                    if user in user2session:
-                        del user2session[user]
-                    response_text = "对话模式结束..."
-                else:
-                    chat_session = user2session.get(user)
-                    if chat_session:
-                        response = chat_session.send_message(content).text
-                    else:
-                        response = model.generate_content(content).text
-                    response_text = convert_to_text(response)
-            except Exception as e:
-                logging.error("Error in chat: %s", e)
-                response_text = "抱歉，服务出现异常，请稍后重试。"
 
-            # 构造返回的XML
+        user = msg_dict.get('FromUserName')
+        to_user = msg_dict.get('ToUserName')
+        msg_type = msg_dict.get('MsgType')
+
+        # 仅在不支持的消息类型时使用XML回复，其他情况使用客服消息接口
+        response_text = None
+
+        if msg_type == 'text':
+            content = msg_dict.get('Content')
+            chat(user, content)
+            return 'success'  # 直接返回成功，回复通过客服消息接口发送
+            
+        elif msg_type == 'voice':
+            # 获取语音识别结果
+            content = msg_dict.get('Recognition', '未能识别语音内容')
+            chat(user, content)
+            return 'success'  # 直接返回成功，回复通过客服消息接口发送
+            
+        elif msg_type == 'image':
+            # 获取图片URL
+            pic_url = msg_dict.get('PicUrl')
+            chat(user, "请描述这张图片", image_url=pic_url)
+            return 'success'  # 直接返回成功，回复通过客服消息接口发送
+        
+        else:
+            response_text = "抱歉，暂不支持此类型的消息。"
+
+        # 只有在设置了response_text时才构造XML返回
+        # 该返回方式必须在5s内返回（微信限制），否则用户无法接收消息。AI处理消息耗时很容易超过5s, 调AI接口时走客户消息接口，不使用此方式
+        if response_text:
             reply = {
                 'xml': {
                     'ToUserName': user,
