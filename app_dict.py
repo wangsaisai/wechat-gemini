@@ -33,7 +33,7 @@ safety_settings = dic['safety_settings']
 
 # 初始化 Gemini
 genai.configure(api_key=gemini_api_key)
-model = genai.GenerativeModel('gemini-2.0-flash-exp', 
+model = genai.GenerativeModel('gemini-2.0-flash-lite', 
                             generation_config=generation_config,
                             safety_settings=safety_settings)
 
